@@ -116,6 +116,13 @@ basicLLVMDependencies = [
     'llvm-as'
 ]
 
+
+testSuites = {}
+
+sys.path.append(_testDir)
+from suites import *
+
+
 def _graal_llvm_gate_runner(args, tasks):
     """gate function"""
     executeGate()
@@ -480,7 +487,7 @@ def extract_compiler_args(args, useDoubleDash=False):
                 remainder += [arg]
     return compilerArgs, remainder
 
-def runLLVM(args=None, out=None):
+def runLLVM(args=None, nonZeroIsFatal=True, out=None):
     """uses Sulong to execute a LLVM IR file"""
     vmArgs, sulongArgsWithLibs = truffle_extract_VM_args(args)
     sulongArgs = []
@@ -490,20 +497,20 @@ def runLLVM(args=None, out=None):
             libNames.append(arg)
         else:
             sulongArgs.append(arg)
-    return mx.run_java(getCommonOptions(libNames) + vmArgs + getClasspathOptions() + ['-XX:-UseJVMCIClassLoader', "com.oracle.truffle.llvm.LLVM"] + sulongArgs, out=out, jdk=mx.get_jdk(tag='jvmci'))
+    return mx.run_java(getCommonOptions(libNames) + vmArgs + getClasspathOptions() + ['-XX:-UseJVMCIClassLoader', "com.oracle.truffle.llvm.LLVM"] + sulongArgs, nonZeroIsFatal=nonZeroIsFatal, out=out, jdk=mx.get_jdk(tag='jvmci'))
 
 def runTests(args=None):
     """runs all the test cases or selected ones (see -h or --help)"""
     vmArgs, otherArgs = truffle_extract_VM_args(args)
     parser = argparse.ArgumentParser(description="Executes all or selected test cases of Sulong's test suites.")
-    parser.add_argument('suite', nargs='*', help=' '.join(testCases.keys()), default=testCases.keys())
+    parser.add_argument('suite', nargs='*', help=' '.join(testSuites.keys()), default=testSuites.keys())
     parser.add_argument('--verbose', dest='verbose', action='store_const', const=True, default=False, help='Display the test suite names before execution')
     parsedArgs = parser.parse_args(otherArgs)
     for testSuiteName in parsedArgs.suite:
         if parsedArgs.verbose:
             print 'executing', testSuiteName, 'test suite'
-        command = testCases[testSuiteName]
-        command(vmArgs)
+        harness = testSuites[testSuiteName]
+        harness.run(vmArgs)
 
 def runChecks(args=None):
     """runs all the static analysis tools or selected ones (see -h or --help)"""
@@ -652,12 +659,13 @@ def compileArgon2(main, optimize, cflags=None):
         cflags = []
     argon2Src = ['src/argon2', 'src/core', 'src/blake2/blake2b', 'src/thread', 'src/encoding', 'src/ref', 'src/%s' % main, '../pthread-stub/pthread']
     argon2Bin = '%s.su' % main
-    for src in argon2Src:
-        inputFile = '%s.c' % src
-        outputFile = '%s.ll' % src
-        compileWithClang(['-S', '-emit-llvm', '-o', outputFile, '-std=c89', '-Wall', '-Wextra', '-Wno-type-limits', '-I../pthread-stub', '-Iinclude', '-Isrc'] + cflags + [inputFile])
-        if optimize:
-            opt(['-S', '-o', outputFile, outputFile] + getStandardLLVMOptFlags())
+    multicompileFiles(['%s.c' % x for x in argon2Src], [Compiler.CLANG], ['-std=c89', '-Wall', '-Wextra', '-Wno-type-limits', '-I../pthread-stub', '-Iinclude', '-Isrc'] + cflags, [Optimization.NONE], ProgrammingLanguage.LLVMIR)
+    #for src in argon2Src:
+    #    inputFile = '%s.c' % src
+    #    outputFile = '%s.ll' % src
+    #    Compiler.CLANG.compile(inputFile, outputFile, ['-std=c89', '-Wall', '-Wextra', '-Wno-type-limits', '-I../pthread-stub', '-Iinclude', '-Isrc'] + cflags)
+    #    if optimize:
+    #        opt(['-S', '-o', outputFile, outputFile] + getStandardLLVMOptFlags())
     link(['-o', argon2Bin] + ['%s.ll' % x for x in argon2Src])
 
 def runTestArgon2Kats(args=None):
@@ -670,7 +678,7 @@ def runTestArgon2Kats(args=None):
             else:
                 kats = 'kats/argon2%s_v%s' % (t, v)
 
-            ret = runLLVM(args + ['genkat.su', t, v], out=open('tmp', 'w'))
+            ret = Runtime.SULONG.run('genkat.su', [t, v], vmArgs=args, out=open('tmp', 'w'))
             if ret == 0:
                 ret = mx.run(['diff', 'tmp', kats])
                 if ret == 0:
@@ -700,7 +708,7 @@ def runTestArgon2(args=None, optimize=False):
         return ret
 
     compileArgon2('test', optimize)
-    return runLLVM(args + ['test.su'])
+    return Runtime.SULONG.run('test.su', args, vmArgs=args)
 
 def getCommonOptions(lib_args=None):
     return [
